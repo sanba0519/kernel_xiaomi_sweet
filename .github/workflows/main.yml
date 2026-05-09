@@ -6,110 +6,107 @@ on:
 
 jobs:
   build:
-
     runs-on: ubuntu-22.04
 
     steps:
     - uses: actions/checkout@v4
 
-    - name: 构建编译内核环境
+    - name: 安装编译依赖
       run: |
         sudo apt-get update
-        sudo -E apt-get -y -qq install git make bc bison ccache openssl dos2unix zip kmod cpio flex libelf-dev curl libssl-dev libtfm-dev wget device-tree-compiler ca-certificates python3 python2 binutils binutils-aarch64-linux-gnu binutils-arm-linux-gnueabi
-        mkdir -p $GITHUB_WORKSPACE/kernel_workspace
+        sudo apt-get install -y \
+          bc bison flex make gcc g++ libssl-dev libncurses5-dev libelf-dev \
+          libyaml-dev \
+          ccache git python3 python2 binutils binutils-aarch64-linux-gnu \
+          android-tools-mkbootimg zip curl wget dos2unix kmod cpio
 
-    - name: 下载 Gcc编译器
+    - name: 下载 Gcc 编译器
       run: |
         cd $GITHUB_WORKSPACE/kernel_workspace
+        mkdir -p gcc64 gcc32
         
-        mkdir gcc64
-        wget -O gcc-aarch64.tar.gz https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/aarch64/aarch64-linux-android-4.9/+archive/refs/tags/android-12.1.0_r27.tar.gz
+        wget -q -O gcc-aarch64.tar.gz https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/aarch64/aarch64-linux-android-4.9/+archive/refs/tags/android-12.1.0_r27.tar.gz
         tar -C gcc64/ -zxvf gcc-aarch64.tar.gz
-    
-        mkdir gcc32
-        wget -O gcc-arm.tar.gz https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/arm/arm-linux-androideabi-4.9/+archive/refs/tags/android-12.1.0_r27.tar.gz
+        
+        wget -q -O gcc-arm.tar.gz https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/arm/arm-linux-androideabi-4.9/+archive/refs/tags/android-12.1.0_r27.tar.gz
         tar -C gcc32/ -zxvf gcc-arm.tar.gz
 
-    - name: 下载Clang编译器
+    - name: 下载 Clang 编译器
       run: |
         cd $GITHUB_WORKSPACE/kernel_workspace
-        mkdir clang-aosp
+        mkdir -p clang-aosp
         git clone -q --depth=1 https://github.com/crdroidandroid/android_prebuilts_clang_host_linux-x86_clang-6443078 -b 10.0 clang-aosp
-    
 
     - name: 下载内核源码
       run: |
         cd $GITHUB_WORKSPACE/kernel_workspace
-        git clone https://github.com/sanba0519/kernel_xiaomi_sweet android-kernel
-        cd android-kernel
-        
-    - name: 更新依赖 Install Dependencies
-      run: |
-        sudo apt-get update
-        sudo apt-get install -y \
-        bc bison flex libssl-dev make gcc g++ \
-        libncurses5-dev libelf-dev \
-        libyaml-dev \
-        python3 python3-pip \
-        ccache git
+        git clone --depth 1 https://github.com/sanba0519/kernel_xiaomi_sweet android-kernel
 
-    - name: 打patch
+    - name: 打 RKSU Patch
       run: |
-        echo "KSU_LOG: 开始下载并应用 RKSU 官方 4.14 patch"
-        
         cd $GITHUB_WORKSPACE/kernel_workspace/android-kernel
-
-        # 下载官方 patch
-        wget https://github.com/rksuorg/kernel_patches/raw/master/manual_hook/kernel-4.14.patch -O ksu-4.14.patch || { echo "下载 patch 失败"; exit 1; }
-
-        # 应用 patch
-        patch -p1 < ksu-4.14.patch || { echo "patch 应用失败"; cat ksu-4.14.patch; exit 1; }
+        echo "KSU_LOG: 开始下载并应用 RKSU 官方 4.14 patch"
+        wget -q https://github.com/rksuorg/kernel_patches/raw/master/manual_hook/kernel-4.14.patch -O ksu-4.14.patch
+        patch -p1 < ksu-4.14.patch || { echo "patch 应用失败"; exit 1; }
         echo "KSU_LOG: patch 应用成功"
 
-
-    - name: 集成 RKSU
+    - name: 集成 KernelSU (RKSU)
       run: |
         cd $GITHUB_WORKSPACE/kernel_workspace/android-kernel
         rm -rf KernelSU
         curl -LSs "https://raw.githubusercontent.com/rsuntk/KernelSU/main/kernel/setup.sh" | bash -s main
-               
-    - name: 设置ccache缓存
+
+    - name: 设置 ccache 缓存
       uses: hendrikmuhs/ccache-action@v1.2
       with:
-        key: build-kernel-mido-kernel
+        key: build-kernel-sweet-rksu
         max-size: 4G
 
+    - name: 清理旧构建文件（重要！解决 dtc 缓存问题）
+      run: |
+        cd $GITHUB_WORKSPACE/kernel_workspace/android-kernel
+        make O=out mrproper || true
+        rm -rf out/ scripts/dtc/ .config
 
     - name: 配置环境并编译内核
       run: |
         cd $GITHUB_WORKSPACE/kernel_workspace/android-kernel
+        
         export PATH=$GITHUB_WORKSPACE/kernel_workspace/clang-aosp/bin:$GITHUB_WORKSPACE/kernel_workspace/gcc64/bin:$GITHUB_WORKSPACE/kernel_workspace/gcc32/bin:$PATH
         export ARCH=arm64
         export SUBARCH=arm64
-
-        make O=out stock_defconfig
-
-        cd $GITHUB_WORKSPACE/kernel_workspace/android-kernel
-        export PATH=$GITHUB_WORKSPACE/kernel_workspace/clang-aosp/bin:$GITHUB_WORKSPACE/kernel_workspace/gcc64/bin:$GITHUB_WORKSPACE/kernel_workspace/gcc32/bin:$PATH
         export KBUILD_BUILD_HOST=coolapk@sanba
         export KBUILD_BUILD_USER=GitHub@sanba0519
-        make -s -j$(nproc --all) O=out ARCH=arm64 stock_defconfig
-        make -j$(nproc --all) CC="ccache clang" O=out ARCH=arm64 CLANG_TRIPLE=aarch64-linux-gnu- CROSS_COMPILE=aarch64-linux-android- CROSS_COMPILE_ARM32=arm-linux-androideabi- LD=ld.lld
-                
-    - name: 制作Anykernel3卡刷包
+        
+        echo "=== 使用 stock_defconfig ==="
+        make O=out stock_defconfig
+        
+        echo "=== 开始编译内核 ==="
+        make -j$(nproc --all) O=out \
+          CC="ccache clang" \
+          ARCH=arm64 \
+          CLANG_TRIPLE=aarch64-linux-gnu- \
+          CROSS_COMPILE=aarch64-linux-android- \
+          CROSS_COMPILE_ARM32=arm-linux-androideabi- \
+          LD=ld.lld
+
+    - name: 制作 AnyKernel3 卡刷包
       run: |
         cd $GITHUB_WORKSPACE/kernel_workspace
         git clone https://github.com/sanba0519/AnyKernel3
-        sed -i 's/do.devicecheck=1/do.devicecheck=0/g' AnyKernel3/anykernel.sh
-        sed -i 's!block=/dev/block/platform/omap/omap_hsmmc.0/by-name/boot;!block=auto;!g' AnyKernel3/anykernel.sh
-        sed -i 's/is_slot_device=0;/is_slot_device=auto;/g' AnyKernel3/anykernel.sh
-        cp android-kernel/out/arch/arm64/boot/Image.gz-dtb AnyKernel3/
-        rm -rf AnyKernel3/.git* AnyKernel3/README.md
+        cd AnyKernel3
         
-    
+        sed -i 's/do.devicecheck=1/do.devicecheck=0/g' anykernel.sh
+        sed -i 's!block=/dev/block/platform/omap/omap_hsmmc.0/by-name/boot;!block=auto;!g' anykernel.sh
+        sed -i 's/is_slot_device=0;/is_slot_device=auto;/g' anykernel.sh
+        
+        cp ../android-kernel/out/arch/arm64/boot/Image.gz-dtb ./
+        rm -rf .git* README.md
+        
+        zip -r9 ../MT6853-RKSU-AnyKernel3.zip * -x "*.git*"
 
     - name: 上传 AnyKernel3 卡刷包
       uses: actions/upload-artifact@v4
       with:
         name: MT6853-RKSU-AnyKernel3
-        path: kernel_workspace/AnyKernel3/*
+        path: kernel_workspace/MT6853-RKSU-AnyKernel3.zip
